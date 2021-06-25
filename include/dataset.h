@@ -1,48 +1,20 @@
 #pragma once
 
-#include <vector>
-#include <string>
 #include <fstream>
-#include <Eigen/Core>
-#include <Eigen/Geometry>
-#include <sophus/se3.hpp>
-#include <opencv2/opencv.hpp>
-
-typedef Eigen::Matrix<float, 6, 1> Vector6f;
-typedef Eigen::Matrix<float, 7, 1> Vector7f;
+#include "common_types.h"
 
 
-struct Camera
+class Dataset
 {
-	float fx, fy, cx, cy;
-	float distortion[5];
-	cv::Matx33f K = cv::Matx33f::eye();
-	
-	Camera(float _fx, float _fy, float _cx, float _cy) : fx(_fx), fy(_fy), cx(_cx), cy(_cy)
-	{
-		K(0, 0) = fx;
-		K(1, 1) = fy;
-		K(0, 2) = cx;
-		K(1, 2) = cy;
-	}
-
-	Camera(cv::Matx33f &_K) : K(_K)
-	{
-		fx = K(0, 0);
-		fy = K(1, 1);
-		cx = K(0, 2);
-		cy = K(1, 2);
-	}
-};
-
-
-class Dataset {
 public:
 	int size() { return size_; }
+	Camera getCamera() { return cam_; }
+	// virtual void getData(int index, cv::Mat &img, cv::Mat &depth) const {}
 
 protected:
 	Dataset() {}
 
+	Camera cam_;
 	int width_, height_;
 	float fx_, fy_, cx_, cy_;
 	float distortion[5] = { 0 };
@@ -77,12 +49,7 @@ public:
 	NewStereoTsukubaDataset(const std::string dataset_dir, const ILLUMINATION illumination = ILLUMINATION::FLUORESCENT)
 	{
 		// Set camera parameters
-		width_ = 640;
-		height_ = 480;
-		fx_ = 615.f;
-		fy_ = 615.f;
-		cx_ = width_ / 2.f;
-		cy_ = height_ / 2.f;
+		cam_ = Camera(640, 480, 615.f, 615.f, 320, 240);
 		baseline_ = 10.f;
 		size_ = 1800;
 
@@ -136,17 +103,17 @@ public:
 		ifs.close();
 	}
 
-	void getData(int index, cv::Mat& img, cv::Mat& depth, bool flag_right=false, bool flag_rgb=false)
+	void getData(int index, cv::Mat& img, cv::Mat& depth, bool flag_right=false, bool flag_color=false)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][flag_right], flag_rgb);
+		img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
 		getDepth(depths_filenames_[index][flag_right], depth);
 	}
 
-	void getData(int index, cv::Mat& img, bool flag_right = false, bool flag_rgb = false)
+	void getData(int index, cv::Mat& img, bool flag_right=false, bool flag_color=false)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][flag_right], flag_rgb);
+		img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
 	}
 
 	void getPose(int index, Sophus::SE3f& xi, bool flag_right=false)
@@ -184,6 +151,7 @@ private:
 };
 
 
+// TODO: change associations.txt style 
 /// <summary>
 /// https://vision.in.tum.de/data/datasets/rgbd-dataset
 /// </summary>
@@ -194,8 +162,6 @@ public:
 
 	TUMRGBDDataset(const std::string dataset_dir, TUMRGBD tumrgbd)
 	{
-		width_ = 640;
-		height_ = 480;
 		setCalibrationParameters(tumrgbd);
 
 		std::ifstream ifs(dataset_dir + "associations.txt");
@@ -250,32 +216,15 @@ private:
 		switch (tumrgbd)
 		{
 		case TUMRGBD::FREIBURG1:
-			fx_ = 517.3f;
-			fy_ = 516.5f;
-			cx_ = 318.6f;
-			cy_ = 255.3f;
-			distortion[0] = 0.2624f;
-			distortion[1] = -0.9531f;
-			distortion[2] = -0.0054f;
-			distortion[3] = 0.0026f;
-			distortion[4] = 1.1633f;
+			cam_ = Camera(640, 480, 517.3f, 516.5f, 318.6f, 255.3f);
+			cam_.setDistortions(0.2624f, -0.9531f, -0.0054f, 0.0026f, 1.1633f);
 			break;
 		case TUMRGBD::FREIBURG2:
-			fx_ = 520.9f;
-			fy_ = 521.0f;
-			cx_ = 325.1f;
-			cy_ = 249.7f;
-			distortion[0] = 0.2312f;
-			distortion[1] = -0.7849f;
-			distortion[2] = -0.0033f;
-			distortion[3] = 0.0001f;
-			distortion[4] = 0.9172f;
+			cam_ = Camera(640, 480, 520.9f, 521.0f, 325.1f, 249.7f);
+			cam_.setDistortions(0.2312f, -0.7849f, -0.0033f, 0.0001f, 0.9172f);
 			break;
 		case TUMRGBD::FREIBURG3:
-			fx_ = 535.4f;
-			fy_ = 539.2f;
-			cx_ = 320.1f;
-			cy_ = 247.6f;
+			cam_ = Camera(640, 480, 535.4f, 539.2f, 320.1f, 247.6f);
 			break;
 		default:
 			throw std::exception();
@@ -304,10 +253,7 @@ public:
 
 	ICLNUIMDataset(std::string dataset_dir, ICLNUIM iclnuim)
 	{
-		fx_ = 481.2f;
-		fy_ = -480.f;
-		cx_ = 319.5f;
-		cy_ = 239.5f;
+		cam_ = Camera(640, 480, 481.2f, -480.f, 319.5f, 239.5f);
 
 		std::ifstream ifs(dataset_dir + getPoseFilename(iclnuim));
 		std::string line;
@@ -339,10 +285,10 @@ public:
 		size_ = count;
 	}
 	
-	void getData(int index, cv::Mat& img, cv::Mat& depth, bool flag_rgb=false)
+	void getData(int index, cv::Mat& img, cv::Mat& depth, bool flag_color=false)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][0], flag_rgb);
+		img = cv::imread(imgs_filenames_[index][0], flag_color);
 		depth = cv::imread(depths_filenames_[index][0], cv::IMREAD_UNCHANGED);
 		depth.convertTo(depth, CV_32F, 1.f / 5000.f);
 	}
@@ -396,11 +342,14 @@ public:
 	KITTIDataset(std::string odometry_dataset_dir, int sequence_index = 0)
 	{
 		assert(sequence_index >= 0 && sequence_index <= 12);
-		width_ = 1241;
-		height_ = 376;
 
 		std::string sequence_str = getZeropadStr(sequence_index, 2);
 		std::ifstream ifs(odometry_dataset_dir + sequence_str + "/times.txt");
+		if (ifs.fail())
+		{
+			std::cerr << "Failed to load dataset!!! : " + odometry_dataset_dir + sequence_str + "/times.txt\n";
+			return;
+		}
 		std::string line;
 		int count = 0;
 		while (std::getline(ifs, line))
@@ -428,26 +377,17 @@ private:
 	{
 		if (sequence_index >= 0 && sequence_index <= 2)
 		{
-			fx_ = 718.856f;
-			fy_ = 718.856f;
-			cx_ = 607.1928f;
-			cy_ = 185.2157f;
+			cam_ = Camera(1241, 376, 718.856f, 718.856f, 607.1928f, 185.2157f);
 			baseline_ = 386.1448f;  // times fx;
 		}
 		else if (sequence_index == 3)
 		{
-			fx_ = 721.5377f;
-			fy_ = 721.5377f;
-			cx_ = 609.5593f;
-			cy_ = 172.854f;
+			cam_ = Camera(1241, 376, 721.5377f, 721.5377f, 609.5593f, 172.854f);
 			baseline_ = 387.5744f;  // times fx;
 		}
 		else if (sequence_index <= 12)
 		{
-			fx_ = 707.0912f;
-			fy_ = 707.0912f;
-			cx_ = 601.8873f;
-			cy_ = 183.1104f;
+			cam_ = Camera(1241, 376, 707.0912f, 707.0912f, 601.8873f, 183.1104f);
 			baseline_ = 389.8145f;
 		}
 		else

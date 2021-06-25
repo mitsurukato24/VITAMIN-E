@@ -6,12 +6,15 @@ cmake_minimum_required (VERSION 3.8)
 project ("VITAMIN-E")
 
 find_package(Eigen3 REQUIRED)
-# find_package(Sophus REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(Glog REQUIRED)
 # find_package(Ceres REQUIRED)
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O2")
-set(CMAKE_CXX_STANDARD 14)
+include_directories(${Glog_INCLUDE_DIRS})
+link_libraries(${Glog_LIBS})
+
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -s -DNDEBUG -march=native")
+set(CMAKE_CXX_STANDARD 17)
 
 # Add source to this project's executable.
 include_directories(VITAMIN-E "include/")
