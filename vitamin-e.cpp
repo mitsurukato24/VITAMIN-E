@@ -50,7 +50,7 @@ int main(int argc, char **argv)
 		cv::imshow("img", img);
 		cv::Mat debug_kappa;
 		cv::applyColorMap(current_frame->kappa_, debug_kappa, cv::COLORMAP_JET);  // BRUE -> RED
-		cv::imshow("Debug - Kappa", debug_kappa);
+		cv::imshow("Debug - Curvature", debug_kappa);
 
 		// system->debugFeatureMatching();
 		system->debugDenseTracking();

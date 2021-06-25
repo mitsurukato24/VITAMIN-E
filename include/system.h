@@ -99,9 +99,9 @@ public:
             cv::Point2f last_pt(last_frame_->features_[match.first]->position_[0], last_frame_->features_[match.first]->position_[1]);
             cv::Point2f curr_pt(current_frame_->features_[match.second]->position_[0], current_frame_->features_[match.second]->position_[1]);
             cv::Point2f p = last_pt - curr_pt;
-            int deg = (static_cast<int>(std::atan2(p.y, p.x) / M_PI * 180.) + 180) % 180;
+            int deg = (static_cast<int>(std::atan2(p.y, p.x) / M_PI * 180.) + 180) / 2;
             uchar v = cv::norm(p);
-            cv::line(draw_flow, last_pt, curr_pt, cv::Scalar(deg % 180, 255, 255));
+            cv::line(draw_flow, last_pt, curr_pt, cv::Scalar(deg, 255, 255));
         }
         cv::cvtColor(draw_flow, draw_flow, cv::COLOR_HSV2BGR);
         cv::imshow("Debug - Dence Tracking", draw_flow);
