@@ -20,3 +20,7 @@ attempt to implement VITAMIN-E SLAM (not finished yet...)
 * Initialize by P3P
 * Bundle Adjustment
 * TSDF
+
+## Reference
+
+https://unit.aist.go.jp/hcmrc/mr-rt/papers/published/VITAMIN-E_CVPR2019.pdf
