@@ -13,7 +13,7 @@ attempt to implement VITAMIN-E SLAM (not finished yet...)
 
 * Estimate affine transform - DONE
 * Dense tracking - DONE  
-  ![kitti_densetracking](figures/kitti_densetracking.gif)
+  <img src="figures/kitti_densetracking.gif" width="512">
   * top left : original image
   * top right : curvature image showed by cv::COLORMAP_JET (BLUE(0) -> RED(255))
   * bottom left : dense tracking showed by HSV (degree from 2d vector, 255, 255)
