@@ -11,33 +11,39 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/xfeatures2d.hpp>
 
-typedef Eigen::Matrix<float, 6, 1> Vector6f;
-typedef Eigen::Matrix<float, 7, 1> Vector7f;
+#include <opengv/relative_pose/CentralRelativeAdapter.hpp>
+#include <opengv/relative_pose/methods.hpp>
+#include <opengv/sac/Ransac.hpp>
+#include <opengv/sac_problems/relative_pose/CentralRelativePoseSacProblem.hpp>
+#include <opengv/sac_problems/relative_pose/EigensolverSacProblem.hpp>
+
+typedef Eigen::Matrix<double, 6, 1> Vector6f;
+typedef Eigen::Matrix<double, 7, 1> Vector7f;
 typedef Eigen::Matrix<double, 6, 1> Vector6d;
 typedef Eigen::Matrix<double, 7, 1> Vector7d;
 
 
-static inline float getSubpixelValue(const uchar *img_ptr, const float x, const float y, const int width, const int height)
+static inline double getSubpixelValue(const uchar *img_ptr, const double x, const double y, const int width, const int height)
 {
     const int x0 = floor(x), y0 = floor(y);
     const int x1 = x0 + 1, y1 = y0 + 1;
     
-    const float x1_weight = x - x0;
-    const float y1_weight = y - y0;
-    const float x0_weight = 1.f - x1_weight;
-    const float y0_weight = 1.f - y1_weight;
+    const double x1_weight = x - x0;
+    const double y1_weight = y - y0;
+    const double x0_weight = 1. - x1_weight;
+    const double y0_weight = 1. - y1_weight;
 
-    const float weight_00 = x0_weight * y0_weight;
-    const float weight_10 = x1_weight * y0_weight;
-    const float weight_01 = x0_weight * y1_weight;
-    const float weight_11 = x1_weight * y1_weight;
+    const double weight_00 = x0_weight * y0_weight;
+    const double weight_10 = x1_weight * y0_weight;
+    const double weight_01 = x0_weight * y1_weight;
+    const double weight_11 = x1_weight * y1_weight;
 
-    const float sum_weight = weight_00 + weight_01 + weight_10 + weight_11;
+    const double sum_weight = weight_00 + weight_01 + weight_10 + weight_11;
 
-    float total = (float)img_ptr[y0 * width + x0] * weight_00 
-        + (float)img_ptr[y0 * width + x1] * weight_01 
-        + (float)img_ptr[y1 * width + x0] * weight_10
-        + (float)img_ptr[y1 * width + x1] * weight_11;
+    double total = (double)img_ptr[y0 * width + x0] * weight_00 
+        + (double)img_ptr[y0 * width + x1] * weight_01 
+        + (double)img_ptr[y1 * width + x0] * weight_10
+        + (double)img_ptr[y1 * width + x1] * weight_11;
     
     return total / sum_weight;
 }
@@ -45,58 +51,85 @@ static inline float getSubpixelValue(const uchar *img_ptr, const float x, const 
 
 struct Camera
 {
-    int width, height;
-	float fx, fy, cx, cy;
-	float distortions[5] = {0};
-	cv::Matx33f K = cv::Matx33f::eye();
+    typedef std::shared_ptr<Camera> Ptr;
+    int width_, height_;
+	double fx_, fy_, cx_, cy_;
+    cv::Matx<double, 1, 5> distortions_;
+	cv::Matx33d K_ = cv::Matx33d::eye();
 
     Camera() {}
 	
-	Camera(float fx, float fy, float cx, float cy) : fx(fx), fy(fy), cx(cx), cy(cy)
+	Camera(double fx, double fy, double cx, double cy) : fx_(fx), fy_(fy), cx_(cx), cy_(cy)
 	{
-		K(0, 0) = fx;
-		K(1, 1) = fy;
-		K(0, 2) = cx;
-		K(1, 2) = cy;
+		K_(0, 0) = fx;
+		K_(1, 1) = fy;
+		K_(0, 2) = cx;
+		K_(1, 2) = cy;
 	}
 
-    Camera(int width, int height, float fx, float fy, float cx, float cy)
-        : width(width), height(height), fx(fx), fy(fy), cx(cx), cy(cy)
+    Camera(int width, int height, double fx, double fy, double cx, double cy)
+        : width_(width), height_(height), fx_(fx), fy_(fy), cx_(cx), cy_(cy)
     {
-        K(0, 0) = fx;
-		K(1, 1) = fy;
-		K(0, 2) = cx;
-		K(1, 2) = cy;
+        K_(0, 0) = fx;
+		K_(1, 1) = fy;
+		K_(0, 2) = cx;
+		K_(1, 2) = cy;
     }
 
-	Camera(cv::Matx33f &K) : K(K)
+	Camera(cv::Matx33f &K) : K_(K)
 	{
-		fx = K(0, 0);
-		fy = K(1, 1);
-		cx = K(0, 2);
-		cy = K(1, 2);
+		fx_ = K(0, 0);
+		fy_ = K(1, 1);
+		cx_ = K(0, 2);
+		cy_ = K(1, 2);
 	}
 
-    void setDistortions(float d0, float d1, float d2, float d3, float d4=0)
+    inline void setDistortions(double d0, double d1, double d2, double d3, double d4=0)
     {
-        distortions[0] = d0;
-        distortions[1] = d1;
-        distortions[2] = d2;
-        distortions[3] = d3;
-        distortions[4] = d4;
+        distortions_(0) = d0;
+        distortions_(1) = d1;
+        distortions_(2) = d2;
+        distortions_(3) = d3;
+        distortions_(4) = d4;
+    }
+
+    cv::Mat undistort(cv::Mat &img)
+    {
+        cv::Mat undistorted;
+        cv::undistort(img, undistorted, K_, distortions_);
+        return undistorted;
+    }
+
+    inline Eigen::Vector2d project(const Eigen::Vector3d &p3d)
+    {
+        Eigen::Vector2d res;
+        res[0] = (fx_ * p3d[0]) / p3d[2] + cx_;
+        res[1] = (fy_ * p3d[1]) / p3d[2] + cy_;
+        return res;
+    }
+
+    inline Eigen::Vector3d unproject(const Eigen::Vector2d &p2d)
+    {
+        Eigen::Vector3d res;
+        res[0] = (p2d[0] - cx_) / fx_;
+        res[1] = (p2d[1] - cy_) / fy_;
+        res[2] = 1;
+        res.normalize();
+        return res;
     }
 };
 
 
 struct MeasureTime
 {
-    inline MeasureTime()
+    inline MeasureTime(std::string name) : name(name)
     {
         start();
     }
 
     inline void start()
     {
+        printf("[TIME] : [START] %s\n", name.c_str());
         start_ = std::chrono::system_clock::now();
     }
 
@@ -110,12 +143,13 @@ struct MeasureTime
     inline double printTime(std::string s="")
     {
         double duration = end();
-        printf("[Time] %s: %f[ms]\n", s.c_str(), duration);
+        printf("[Time] : [ END ] %s %s %f[ms]\n", name.c_str(), s.c_str(), duration);
         return duration;
     }
 
 private:
     std::chrono::system_clock::time_point start_, end_;
+    std::string name;
 };
 
 
@@ -129,13 +163,13 @@ public:
     typedef std::shared_ptr<Feature> Ptr;
 
     // std::weak_ptr<Frame> frame_;
-    Eigen::Vector2f position_;
+    Eigen::Vector2d position_;
 
     bool is_outlier_ = false;
 
     Feature() {}
-    // Feature(std::shared_ptr<Frame> frame, const Eigen::Vector2f &position) : frame_(frame), position_(position) {}
-    Feature(const Eigen::Vector2f &position) : position_(position) {}
+    // Feature(std::shared_ptr<Frame> frame, const Eigen::Vector2d &position) : frame_(frame), position_(position) {}
+    Feature(const Eigen::Vector2d &position) : position_(position) {}
 };
 
 
@@ -143,6 +177,7 @@ struct MatchData
 {
 public:
     std::vector<std::pair<unsigned int, unsigned int>> matches_;
+    std::vector<unsigned int> inliers_;
 };
 
 
@@ -189,7 +224,6 @@ public:
     {
         static int factory_id = 0;
         Frame::Ptr new_frame = std::make_shared<Frame>(factory_id++, img);
-        // Frame::Ptr new_frame(new Frame(factory_id++, img));
         return new_frame;
     }
 
@@ -206,4 +240,78 @@ public:
 		cv::FAST(ds_img_, ds_kps_, fast_threshold);
 		brief_ptr->compute(ds_img_, ds_kps_, ds_desc_);
 	}
+};
+
+
+class MapPoint
+{
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+    typedef std::shared_ptr<MapPoint> Ptr;
+    unsigned int id_ = 0;
+    Eigen::Vector3d position_ = Eigen::Vector3d::Zero();
+    int observed_times_ = 0;
+    std::list<std::weak_ptr<Feature>> observations_;
+
+    MapPoint() {}
+    MapPoint(int id, Eigen::Vector3d position) : id_(id), position_(position) {}
+
+    void addObservation(Feature::Ptr feature)
+    {
+        observations_.push_back(feature);
+        ++observed_times_;
+    }
+
+    static MapPoint::Ptr createNewMapPoint()
+    {
+        static long factory_id = 0;
+        MapPoint::Ptr new_mappoint = std::make_shared<MapPoint>();
+        new_mappoint->id_ = factory_id++;
+        return new_mappoint;
+    }
+};
+
+
+class Map
+{
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+    typedef std::shared_ptr<Map> Ptr;
+    typedef std::unordered_map<unsigned int, MapPoint::Ptr> LandmarksType;
+    typedef std::unordered_map<unsigned int, Frame::Ptr> KeyframesType;
+    
+    Map() {}
+
+    void insertKeyFrame(Frame::Ptr frame);
+    void insertMapPoint(MapPoint::Ptr map_point);
+
+    LandmarksType getAllMapPoints()
+    {
+        return landmarks_;
+    }
+
+    KeyframesType getAllKeyframes()
+    {
+        return keyframes_;
+    }
+
+    LandmarksType getActiveMapPoints()
+    {
+        return active_landmarks_;
+    }
+
+    KeyframesType getActiveKeyframes()
+    {
+        return active_keyframes_;
+    }
+
+private:
+    LandmarksType landmarks_;
+    LandmarksType active_landmarks_;
+    KeyframesType keyframes_;
+    KeyframesType active_keyframes_;
+
+    Frame::Ptr current_frame_ = nullptr;
+
+    int num_active_keyframes_ = 7;
 };
