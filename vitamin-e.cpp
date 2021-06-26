@@ -17,17 +17,20 @@ int main(int argc, char **argv)
 	// TUMRGBDDataset dataset(rgbd_freiburg1_xyz, TUMRGBDDataset::TUMRGBD::FREIBURG1);
 	
 	string tsukuba = dataset_dir + "NewTsukubaStereoDataset/";
-	NewStereoTsukubaDataset dataset(tsukuba);
+	// NewStereoTsukubaDataset dataset(tsukuba);
 
 	// string kitti = "C:/Dataset/KITTI/data_odometry_gray/";
 	string kitti = dataset_dir + "KITTI/data_odometry_gray/";
-	// KITTIDataset dataset(kitti, 2);
+	// KITTIDataset dataset(kitti, 3);
+
+	string euroc_dataset_dir = "/home/mitsurukato24/Dataset/EUROC/";
+	EUROCDataset dataset(euroc_dataset_dir, EUROCDataset::EUROC::V1_01);
 
 	bool flag_initialize = true;
 	double sum = 0.;
-	MeasureTime measure_time;
+	MeasureTime measure_time("Total");
 
-	auto system = std::make_shared<System>();
+	auto system = std::make_shared<System>(dataset.getCamera());
 
 	std::vector<Frame::Ptr> frames;
 	frames.reserve(dataset.size());
@@ -39,10 +42,11 @@ int main(int argc, char **argv)
 		// Read Image
 		cv::Mat img;
 		dataset.getData(index, img, false);
+
 		current_frame = Frame::CreateFrame(img);
 		system->addFrame(current_frame);
 		
-		double process_time = measure_time.printTime("Total");
+		double process_time = measure_time.printTime("Frame - " + std::to_string(index));
 		sum += process_time;
 		printf("[FPS] : %f\n", ((index + 1.)/ sum) * 1000.f);
 
@@ -52,7 +56,7 @@ int main(int argc, char **argv)
 		cv::applyColorMap(current_frame->kappa_, debug_kappa, cv::COLORMAP_JET);  // BRUE -> RED
 		cv::imshow("Debug - Curvature", debug_kappa);
 
-		// system->debugFeatureMatching();
+		//system->debugFeatureMatching();
 		system->debugDenseTracking();
 		int key = cv::waitKey(1);
 		if (key == 's')

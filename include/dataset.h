@@ -8,23 +8,23 @@ class Dataset
 {
 public:
 	int size() { return size_; }
-	Camera getCamera() { return cam_; }
+	Camera::Ptr getCamera() { return cam_; }
 	// virtual void getData(int index, cv::Mat &img, cv::Mat &depth) const {}
 
 protected:
 	Dataset() {}
 
-	Camera cam_;
+	Camera::Ptr cam_;
 	int width_, height_;
-	float fx_, fy_, cx_, cy_;
-	float distortion[5] = { 0 };
+	double fx_, fy_, cx_, cy_;
+	double distortion[5] = { 0 };
 	cv::Mat K_;
-	float baseline_;  // for stereo
+	double baseline_;  // for stereo
 
 	int size_;  // the number of images
 
 	std::vector<std::vector<std::string>> imgs_filenames_, depths_filenames_;
-	std::vector<std::vector<Vector6f>> gt_poses_;
+	std::vector<std::vector<Vector6d>> gt_poses_;
 
 	std::vector<std::string> time_stamps_;
 
@@ -49,7 +49,7 @@ public:
 	NewStereoTsukubaDataset(const std::string dataset_dir, const ILLUMINATION illumination = ILLUMINATION::FLUORESCENT)
 	{
 		// Set camera parameters
-		cam_ = Camera(640, 480, 615.f, 615.f, 320, 240);
+		cam_ = std::make_shared<Camera>(640, 480, 615.f, 615.f, 320, 240);
 		baseline_ = 10.f;
 		size_ = 1800;
 
@@ -63,7 +63,7 @@ public:
 		while (std::getline(ifs, line))
 		{
 			// Get pose
-			Vector6f pose_center;
+			Vector6d pose_center;
 			std::stringstream ss(line);
 			// X Y Z A B C : x, y, z, theta_x, theta_y, theta_z
 			for (int i = 0; i < 6; ++i)
@@ -80,12 +80,12 @@ public:
 					pose_center(i) = - std::stof(tmps);
 				}
 			}
-			Sophus::SO3f xi = Sophus::SO3f::exp(pose_center.tail(3));
-			Eigen::Vector3f offset(baseline_ / 2.f, 0.f, 0.f);
+			Sophus::SO3d xi = Sophus::SO3d::exp(pose_center.tail(3));
+			Eigen::Vector3d offset(baseline_ / 2.f, 0.f, 0.f);
 			offset = xi.matrix() * offset;
-			gt_poses_.push_back(std::vector<Vector6f>{
-				Sophus::SE3f(xi, pose_center.head(3) - offset).log(),
-					Sophus::SE3f(xi, pose_center.head(3) + offset).log()
+			gt_poses_.push_back(std::vector<Vector6d>{
+				Sophus::SE3d(xi, pose_center.head(3) - offset).log(),
+					Sophus::SE3d(xi, pose_center.head(3) + offset).log()
 			});
 
 			// Get filenames
@@ -116,10 +116,10 @@ public:
 		img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
 	}
 
-	void getPose(int index, Sophus::SE3f& xi, bool flag_right=false)
+	void getPose(int index, Sophus::SE3d& xi, bool flag_right=false)
 	{
 		assert(0 <= index && index < size_);
-		xi = Sophus::SE3f::exp(gt_poses_[index][flag_right]);
+		xi = Sophus::SE3d::exp(gt_poses_[index][flag_right]);
 	}
 
 private:
@@ -162,7 +162,7 @@ public:
 
 	TUMRGBDDataset(const std::string dataset_dir, TUMRGBD tumrgbd)
 	{
-		setCalibrationParameters(tumrgbd);
+		setCameraParameters(tumrgbd);
 
 		std::ifstream ifs(dataset_dir + "associations.txt");
 		int count = 0;
@@ -170,7 +170,7 @@ public:
 		while (std::getline(ifs, line))
 		{
 			std::stringstream ss(line);
-			Vector7f tmp;
+			Vector7d tmp;
 			for (int i = 0; i < 12; ++i)
 			{
 				std::string s;
@@ -188,8 +188,8 @@ public:
 					tmp(i - 5) = std::stof(s);
 				}
 			}
-			Eigen::Quaternionf q(tmp(6), tmp(3), tmp(4), tmp(5));
-			gt_poses_.push_back(std::vector<Vector6f>{Sophus::SE3f(q, tmp.head(3)).log()});
+			Eigen::Quaterniond q(tmp(6), tmp(3), tmp(4), tmp(5));
+			gt_poses_.push_back(std::vector<Vector6d>{Sophus::SE3d(q, tmp.head(3)).log()});
 			++count;
 		}
 		ifs.close();
@@ -204,27 +204,27 @@ public:
 		depth.convertTo(depth, CV_32F, 1.f / 5000.f);
 	}
 
-	void getPose(int index, Sophus::SE3f& xi)
+	void getPose(int index, Sophus::SE3d& xi)
 	{
 		assert(0 <= index && index < size_);
-		xi = Sophus::SE3f::exp(gt_poses_[index][0]);
+		xi = Sophus::SE3d::exp(gt_poses_[index][0]);
 	}
 
 private:
-	void setCalibrationParameters(TUMRGBD tumrgbd)
+	void setCameraParameters(TUMRGBD tumrgbd)
 	{
 		switch (tumrgbd)
 		{
 		case TUMRGBD::FREIBURG1:
-			cam_ = Camera(640, 480, 517.3f, 516.5f, 318.6f, 255.3f);
-			cam_.setDistortions(0.2624f, -0.9531f, -0.0054f, 0.0026f, 1.1633f);
+			cam_ = std::make_shared<Camera>(640, 480, 517.3f, 516.5f, 318.6f, 255.3f);
+			cam_->setDistortions(0.2624f, -0.9531f, -0.0054f, 0.0026f, 1.1633f);
 			break;
 		case TUMRGBD::FREIBURG2:
-			cam_ = Camera(640, 480, 520.9f, 521.0f, 325.1f, 249.7f);
-			cam_.setDistortions(0.2312f, -0.7849f, -0.0033f, 0.0001f, 0.9172f);
+			cam_ = std::make_shared<Camera>(640, 480, 520.9f, 521.0f, 325.1f, 249.7f);
+			cam_->setDistortions(0.2312f, -0.7849f, -0.0033f, 0.0001f, 0.9172f);
 			break;
 		case TUMRGBD::FREIBURG3:
-			cam_ = Camera(640, 480, 535.4f, 539.2f, 320.1f, 247.6f);
+			cam_ = std::make_shared<Camera>(640, 480, 535.4f, 539.2f, 320.1f, 247.6f);
 			break;
 		default:
 			throw std::exception();
@@ -253,7 +253,7 @@ public:
 
 	ICLNUIMDataset(std::string dataset_dir, ICLNUIM iclnuim)
 	{
-		cam_ = Camera(640, 480, 481.2f, -480.f, 319.5f, 239.5f);
+		cam_ = std::make_shared<Camera>(640, 480, 481.2f, -480.f, 319.5f, 239.5f);
 
 		std::ifstream ifs(dataset_dir + getPoseFilename(iclnuim));
 		std::string line;
@@ -261,7 +261,7 @@ public:
 		while (std::getline(ifs, line))
 		{
 			std::stringstream ss(line);
-			Vector7f tmp;
+			Vector7d tmp;
 			for (int i = 0; i < 8; ++i)
 			{
 				std::string s;
@@ -277,8 +277,8 @@ public:
 					tmp(i - 1) = std::stof(s);
 				}
 			}
-			Eigen::Quaternionf q(tmp(6), tmp(3), tmp(4), tmp(5));
-			gt_poses_.push_back(std::vector<Vector6f>{Sophus::SE3f(q, tmp.head(3)).log()});
+			Eigen::Quaterniond q(tmp(6), tmp(3), tmp(4), tmp(5));
+			gt_poses_.push_back(std::vector<Vector6d>{Sophus::SE3d(q, tmp.head(3)).log()});
 			++count;
 		}
 		ifs.close();
@@ -293,10 +293,10 @@ public:
 		depth.convertTo(depth, CV_32F, 1.f / 5000.f);
 	}
 
-	void getPose(int index, Sophus::SE3f& xi)
+	void getPose(int index, Sophus::SE3d& xi)
 	{
 		assert(0 <= index && index < size_);
-		xi = Sophus::SE3f::exp(gt_poses_[index][0]);
+		xi = Sophus::SE3d::exp(gt_poses_[index][0]);
 	}
 
 private:
@@ -342,7 +342,7 @@ public:
 	KITTIDataset(std::string odometry_dataset_dir, int sequence_index = 0)
 	{
 		assert(sequence_index >= 0 && sequence_index <= 12);
-
+		setCameraParameters(sequence_index);
 		std::string sequence_str = getZeropadStr(sequence_index, 2);
 		std::ifstream ifs(odometry_dataset_dir + sequence_str + "/times.txt");
 		if (ifs.fail())
@@ -373,25 +373,98 @@ public:
 	}
 
 private:
-	void getCameraParameters(int sequence_index)
+	void setCameraParameters(int sequence_index)
 	{
 		if (sequence_index >= 0 && sequence_index <= 2)
 		{
-			cam_ = Camera(1241, 376, 718.856f, 718.856f, 607.1928f, 185.2157f);
+			cam_ = std::make_shared<Camera>(1241, 376, 718.856f, 718.856f, 607.1928f, 185.2157f);
 			baseline_ = 386.1448f;  // times fx;
 		}
 		else if (sequence_index == 3)
 		{
-			cam_ = Camera(1241, 376, 721.5377f, 721.5377f, 609.5593f, 172.854f);
+			cam_ = std::make_shared<Camera>(1241, 376, 721.5377f, 721.5377f, 609.5593f, 172.854f);
 			baseline_ = 387.5744f;  // times fx;
 		}
 		else if (sequence_index <= 12)
 		{
-			cam_ = Camera(1241, 376, 707.0912f, 707.0912f, 601.8873f, 183.1104f);
+			cam_ = std::make_shared<Camera>(1241, 376, 707.0912f, 707.0912f, 601.8873f, 183.1104f);
 			baseline_ = 389.8145f;
 		}
 		else
 		{
+			throw std::exception();
+		}
+	}
+};
+
+
+class EUROCDataset : public Dataset
+{
+public:
+	enum class EUROC
+	{
+		V1_01, V1_02, V1_03, V2_01, V2_02, V2_03,
+		MH_01, MH_02, MH_03, MH_04, MH_05
+	};
+
+	EUROCDataset(std::string &euroc_dataset_dir, EUROC euroc)
+	{
+		cam_ = std::make_shared<Camera>(458.654, 457.296, 367.215, 248.375);
+		cam_->setDistortions(-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05, 0);
+
+		std::string dataset_path = euroc_dataset_dir + getString(euroc) + "/mav0/";
+		std::string time_stamps_path = dataset_path + "cam0/data.csv";
+		std::ifstream ifs_time_stamps(time_stamps_path);
+		std::string line;
+		int count = 0;
+		while(std::getline(ifs_time_stamps, line))
+		{
+			if (line.size() < 20 || line[0] == '#') continue;
+			time_stamps_.push_back(line.substr(0, 19));
+
+			std::string img_filename = line.substr(20, line.size() - 21);
+			imgs_filenames_.push_back(std::vector<std::string>{
+				dataset_path + "cam0/data/" + img_filename,
+				dataset_path + "cam1/data/" + img_filename
+			});
+			++count;
+		}
+		size_ = count;
+	}
+
+	void getData(int index, cv::Mat &img, bool flag_right=false, bool flag_color=false)
+	{
+		img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
+	}
+
+private:
+	std::string getString(EUROC euroc)
+	{
+		switch (euroc)
+		{
+		case EUROC::V1_01:
+			return "V1_01_easy";
+		case EUROC::V1_02:
+			return "V1_02_medium";
+		case EUROC::V1_03:
+			return "V1_03_difficult";
+		case EUROC::V2_01:
+			return "V2_01_easy";
+		case EUROC::V2_02:
+			return "V2_02_medium";
+		case EUROC::V2_03:
+			return "V2_03_difficult";
+		case EUROC::MH_01:
+			return "MH_01_easy";
+		case EUROC::MH_02:
+			return "MH_02_easy";
+		case EUROC::MH_03:
+			return "MH_03_medium";
+		case EUROC::MH_04:
+			return "MH_04_difficult";
+		case EUROC::MH_05:
+			return "MH_05_difficult";
+		default:
 			throw std::exception();
 		}
 	}
