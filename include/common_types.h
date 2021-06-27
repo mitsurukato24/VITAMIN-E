@@ -2,20 +2,19 @@
 
 #include <iostream>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <vector>
 #include <unordered_map>
 #include <string>
+#include <omp.h>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <sophus/se3.hpp>
 #include <opencv2/opencv.hpp>
 #include <opencv2/xfeatures2d.hpp>
 
-#include <opengv/relative_pose/CentralRelativeAdapter.hpp>
-#include <opengv/relative_pose/methods.hpp>
-#include <opengv/sac/Ransac.hpp>
-#include <opengv/sac_problems/relative_pose/CentralRelativePoseSacProblem.hpp>
-#include <opengv/sac_problems/relative_pose/EigensolverSacProblem.hpp>
 
 typedef Eigen::Matrix<double, 6, 1> Vector6f;
 typedef Eigen::Matrix<double, 7, 1> Vector7f;
@@ -23,7 +22,7 @@ typedef Eigen::Matrix<double, 6, 1> Vector6d;
 typedef Eigen::Matrix<double, 7, 1> Vector7d;
 
 
-static inline double getSubpixelValue(const uchar *img_ptr, const double x, const double y, const int width, const int height)
+static inline double getSubpixelValue(const uchar* img_ptr, const double x, const double y, const int width, const int height)
 {
     const int x0 = floor(x), y0 = floor(y);
     const int x1 = x0 + 1, y1 = y0 + 1;
@@ -40,8 +39,8 @@ static inline double getSubpixelValue(const uchar *img_ptr, const double x, cons
 
     const double sum_weight = weight_00 + weight_01 + weight_10 + weight_11;
 
-    double total = (double)img_ptr[y0 * width + x0] * weight_00 
-        + (double)img_ptr[y0 * width + x1] * weight_01 
+    double total = (double)img_ptr[y0 * width + x0] * weight_00
+        + (double)img_ptr[y0 * width + x1] * weight_01
         + (double)img_ptr[y1 * width + x0] * weight_10
         + (double)img_ptr[y1 * width + x1] * weight_11;
     
@@ -120,9 +119,9 @@ struct Camera
 };
 
 
-struct MeasureTime
+struct Timer
 {
-    inline MeasureTime(std::string name) : name(name)
+    inline Timer(std::string name) : name(name)
     {
         start();
     }
@@ -154,6 +153,7 @@ private:
 
 
 class Frame;
+class Landmark;
 
 
 struct Feature
@@ -162,8 +162,9 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
     typedef std::shared_ptr<Feature> Ptr;
 
-    // std::weak_ptr<Frame> frame_;
+    std::weak_ptr<Frame> frame_;
     Eigen::Vector2d position_;
+    std::weak_ptr<Landmark> landmark_;
 
     bool is_outlier_ = false;
 
@@ -189,20 +190,23 @@ public:
     unsigned int id_ = 0;
     unsigned int keyframe_id_ = 0;
     bool is_keyframe_ = false;
-	Sophus::SE3f T_i_w;  // world -> this frame
-
-	cv::Mat img_, ds_img_, ds_desc_, kappa_;
+	
+    const int resize_scale_ = 4;
+	cv::Mat_<uchar> img_, ds_img_, kappa_;
+    cv::Mat ds_desc_;
 	std::vector<cv::KeyPoint> ds_kps_;
     std::vector<cv::DMatch> ds_matches_;
 
     std::vector<Feature::Ptr> features_;
     MatchData match_data_;
 
-	Frame(unsigned int id, cv::Mat& img) : id_(id), img_(img)
+    std::mutex pose_mutex_;
+    Sophus::SE3d T_i_w_;  // world -> this frame
+
+	Frame(unsigned int id, cv::Mat &img) : id_(id), img_(img)
 	{
         // Resize for feature matching
-		const int resize_scale = 4;
-		cv::resize(img_, ds_img_, cv::Size(img_.cols / resize_scale, img.rows / resize_scale));
+		cv::resize(img_, ds_img_, cv::Size(img_.cols / resize_scale_, img.rows / resize_scale_));
 
         // Compute curvature image
 		cv::Mat blured, ix, iy, ixx, ixy, iyy, iyiyixx, ixiyixy, ixixiyy;
@@ -216,8 +220,11 @@ public:
 		iyiyixx = iy.mul(iy.mul(ixx));
 		ixiyixy = ix.mul(iy.mul(ixy));
 		iyiyixx = ix.mul(ix.mul(iyy));
-		kappa_ = cv::abs(iyiyixx - 2 * ixiyixy + iyiyixx);
-        cv::normalize(kappa_, kappa_, 0, 255, cv::NORM_MINMAX, CV_8UC1);
+
+        cv::normalize(
+            cv::abs(iyiyixx - 2 * ixiyixy + iyiyixx), kappa_,
+            0, 255, cv::NORM_MINMAX, CV_8UC1
+        );
 	}
 
     static std::shared_ptr<Frame> CreateFrame(cv::Mat &img)
@@ -234,27 +241,43 @@ public:
         keyframe_id_ = keyframe_factory_id++;
     }
 
-	void featureExtract(cv::Ptr<cv::xfeatures2d::BriefDescriptorExtractor> &brief_ptr)
+	void featureExtract(const cv::Ptr<cv::xfeatures2d::BriefDescriptorExtractor> &brief_ptr)
     {
-		const int fast_threshold = 5;
-		cv::FAST(ds_img_, ds_kps_, fast_threshold);
-		brief_ptr->compute(ds_img_, ds_kps_, ds_desc_);
+        const int fast_threshold = 15;
+        cv::FAST(ds_img_, ds_kps_, fast_threshold);
+        brief_ptr->compute(ds_img_, ds_kps_, ds_desc_);
 	}
+
+    Sophus::SE3d getPose()
+    {
+        std::unique_lock<std::mutex> lock(pose_mutex_);
+        return T_i_w_;
+    }
+
+    void setPose(const Sophus::SE3d T_i_w)
+    {
+        std::unique_lock<std::mutex> lock(pose_mutex_);
+        T_i_w_ = T_i_w;
+    }
 };
 
 
-class MapPoint
+typedef std::unordered_map<unsigned long, Frame::Ptr> FramesType;
+
+
+class Landmark
 {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
-    typedef std::shared_ptr<MapPoint> Ptr;
+    typedef std::shared_ptr<Landmark> Ptr;
     unsigned int id_ = 0;
     Eigen::Vector3d position_ = Eigen::Vector3d::Zero();
+    std::mutex data_mutex_;
     int observed_times_ = 0;
     std::list<std::weak_ptr<Feature>> observations_;
 
-    MapPoint() {}
-    MapPoint(int id, Eigen::Vector3d position) : id_(id), position_(position) {}
+    Landmark() {}
+    Landmark(int id, Eigen::Vector3d &position) : id_(id), position_(position) {}
 
     void addObservation(Feature::Ptr feature)
     {
@@ -262,12 +285,33 @@ public:
         ++observed_times_;
     }
 
-    static MapPoint::Ptr createNewMapPoint()
+    static Landmark::Ptr createNewLandmark()
     {
         static long factory_id = 0;
-        MapPoint::Ptr new_mappoint = std::make_shared<MapPoint>();
-        new_mappoint->id_ = factory_id++;
-        return new_mappoint;
+        Landmark::Ptr new_landmark = std::make_shared<Landmark>();
+        new_landmark->id_ = factory_id++;
+        return new_landmark;
+    }
+
+    void removeObservation(std::shared_ptr<Feature> feat)
+    {
+        std::unique_lock<std::mutex> lock(data_mutex_);
+		for (auto iter = observations_.begin(); iter != observations_.end(); iter++)
+		{
+			if (iter->lock() == feat) 
+			{
+				observations_.erase(iter);
+				feat->landmark_.reset();
+				observed_times_--;
+				break;
+			}
+		}
+    }
+
+    std::list<std::weak_ptr<Feature>> getObservation()
+    {
+        std::unique_lock<std::mutex> lock(data_mutex_);
+        return observations_;
     }
 };
 
@@ -277,15 +321,45 @@ class Map
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
     typedef std::shared_ptr<Map> Ptr;
-    typedef std::unordered_map<unsigned int, MapPoint::Ptr> LandmarksType;
+    typedef std::unordered_map<unsigned int, Landmark::Ptr> LandmarksType;
     typedef std::unordered_map<unsigned int, Frame::Ptr> KeyframesType;
     
     Map() {}
 
-    void insertKeyFrame(Frame::Ptr frame);
-    void insertMapPoint(MapPoint::Ptr map_point);
+    void insertKeyFrame(Frame::Ptr frame)
+    {
+        Timer timer("Insert keyframe");
+        current_frame_ = frame;
+        if (keyframes_.find(frame->keyframe_id_) == keyframes_.end())
+        {
+            printf("a\n");
+            keyframes_.insert(std::make_pair(frame->keyframe_id_, frame));
+            active_keyframes_.insert(std::make_pair(frame->keyframe_id_, frame));
+        }
+        else
+        {
+            printf("b\n");
+            keyframes_[frame->keyframe_id_] = std::move(frame);
+            active_keyframes_[frame->keyframe_id_] = std::move(frame);
+        }
+        timer.printTime();
+    }
 
-    LandmarksType getAllMapPoints()
+    void insertLandmark(Landmark::Ptr landmark)
+    {
+        if (landmarks_.find(landmark->id_) == landmarks_.end())
+        {
+			landmarks_.insert(make_pair(landmark->id_, landmark));
+			active_landmarks_.insert(make_pair(landmark->id_, landmark));
+		}
+		else
+        {
+			landmarks_[landmark->id_] = landmark;
+			active_landmarks_[landmark->id_] = landmark;
+		}
+    }
+
+    LandmarksType getAllLandmarks()
     {
         return landmarks_;
     }
@@ -295,7 +369,7 @@ public:
         return keyframes_;
     }
 
-    LandmarksType getActiveMapPoints()
+    LandmarksType getActiveLandmarks()
     {
         return active_landmarks_;
     }
@@ -305,7 +379,88 @@ public:
         return active_keyframes_;
     }
 
+    void cleanMap()
+    {
+        int count_landmark_removed = 0;
+		for (auto iter = active_landmarks_.begin(); iter != active_landmarks_.end();)
+        {
+			if (iter->second->observed_times_ == 0)
+            {
+				iter = active_landmarks_.erase(iter);
+				++count_landmark_removed;
+			}
+			else
+            {
+				++iter;
+			}
+		}
+		// LOG(INFO) << "Removed " << cnt_landmark_removed << " active landmarks";
+    }
+
 private:
+    void removeOldKeyframe()
+    {
+		if (current_frame_ == nullptr) return;
+		// find two closest and farthest keyframe from current frame
+		double max_dis = 0, min_dis = 9999;
+		double max_kf_id = 0, min_kf_id = 0;
+		auto T_w_c = current_frame_->getPose().inverse();  // current -> world
+		for (auto& kf : active_keyframes_)
+        {
+			if (kf.second == current_frame_) continue;
+			auto dis = (kf.second->getPose() * T_w_c).log().norm();
+			if (dis > max_dis)
+            {
+				max_dis = dis;
+				max_kf_id = kf.first;
+			}
+			if (dis < min_dis) 
+            {
+				min_dis = dis;
+				min_kf_id = kf.first;
+			}
+		}
+
+		const double min_dis_th = 0.2;
+		Frame::Ptr frame_to_remove = nullptr;
+		if (min_dis < min_dis_th)
+        {
+			//  If there is a close frame, delete the closest one first
+			frame_to_remove = keyframes_.at(min_kf_id);
+		}
+		else
+        {
+			// Delete the farthest one
+			frame_to_remove = keyframes_.at(max_kf_id);
+		}
+
+		// LOG(INFO) << "remove keyframe " << frame_to_remove->keyframe_id_;
+
+		// remove keyframe and landmark observation
+		active_keyframes_.erase(frame_to_remove->keyframe_id_);
+		for (auto feat : frame_to_remove->features_)
+        {
+			auto landmark = feat->landmark_.lock();
+			if (landmark)
+            {
+				landmark->removeObservation(feat);
+			}
+		}
+        /*
+		for (auto feat : frame_to_remove->features_)
+        {
+			if (feat == nullptr) continue;
+			auto mp = feat->map_point_.lock();
+			if (mp) {
+				mp->RemoveObservation(feat);
+			}
+		}
+        */
+
+		cleanMap();
+    }
+
+    std::mutex data_mutex_;
     LandmarksType landmarks_;
     LandmarksType active_landmarks_;
     KeyframesType keyframes_;
@@ -315,3 +470,47 @@ private:
 
     int num_active_keyframes_ = 7;
 };
+
+
+// forward declaration
+template <typename T>
+inline void hash_combine(std::size_t& seed, const T& val);
+
+// default to std::hash
+template <typename T>
+struct pair_hash : public std::hash<T> {};
+
+// specialize for std::pair
+template <typename S, typename T>
+struct pair_hash<std::pair<S, T>> {
+  inline std::size_t operator()(const std::pair<S, T>& val) const noexcept
+  {
+    std::size_t seed = 0;
+    hash_combine(seed, val.first);
+    hash_combine(seed, val.second);
+    return seed;
+  }
+};
+
+template <typename T>
+inline void hash_combine(std::size_t& seed, const T& val)
+{
+  static_assert(sizeof(size_t) == sizeof(uint64_t),
+                "hash_combine is meant for 64bit size_t");
+
+  const size_t m = 0xc6a4a7935bd1e995;
+  const int r = 47;
+
+  pair_hash<T> hasher;
+  std::size_t hash = hasher(val);
+
+  hash *= m;
+  hash ^= hash >> r;
+  hash *= m;
+
+  seed ^= hash;
+  seed *= m;
+
+  // Completely arbitrary number, to prevent 0's from hashing to 0.
+  seed += 0xe6546b64;
+}

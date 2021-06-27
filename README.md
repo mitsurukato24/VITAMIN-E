@@ -30,3 +30,4 @@ attempt to implement VITAMIN-E SLAM (not finished yet...)
 ## Reference
 
 https://unit.aist.go.jp/hcmrc/mr-rt/papers/published/VITAMIN-E_CVPR2019.pdf
+https://github.com/gaoxiang12/slambook2

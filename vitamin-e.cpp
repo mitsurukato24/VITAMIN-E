@@ -1,6 +1,7 @@
 ﻿#include "common_types.h"
 #include "dataset.h"
 #include "system.h"
+#include <opencv2/core/eigen.hpp>
 
 using namespace std;
 
@@ -11,7 +12,7 @@ int main(int argc, char **argv)
 	string dataset_dir = "/media/mitsurukato24/01D718C7481938D0/Dataset/";
 
 	string icl_nuim_lr_kt2 = dataset_dir + "ICL-NUIM/living_room_traj2_frei_png/";
-	// ICLNUIMDataset dataset(icl_nuim_lr_kt2, ICLNUIMDataset::ICLNUIM::LR_KT2);
+	ICLNUIMDataset dataset(icl_nuim_lr_kt2, ICLNUIMDataset::ICLNUIM::LR_KT2);
 
 	string rgbd_freiburg1_xyz = dataset_dir + "TUMRGB-D/rgbd_dataset_freiburg1_xyz/";
 	// TUMRGBDDataset dataset(rgbd_freiburg1_xyz, TUMRGBDDataset::TUMRGBD::FREIBURG1);
@@ -24,29 +25,28 @@ int main(int argc, char **argv)
 	// KITTIDataset dataset(kitti, 3);
 
 	string euroc_dataset_dir = "/home/mitsurukato24/Dataset/EUROC/";
-	EUROCDataset dataset(euroc_dataset_dir, EUROCDataset::EUROC::V1_01);
-
-	bool flag_initialize = true;
+	// EUROCDataset dataset(euroc_dataset_dir, EUROCDataset::EUROC::V1_01);
+	
 	double sum = 0.;
-	MeasureTime measure_time("Total");
 
-	auto system = std::make_shared<System>(dataset.getCamera());
+	auto cam = dataset.getCamera();
+	auto system = std::make_shared<System>(cam);
 
-	std::vector<Frame::Ptr> frames;
-	frames.reserve(dataset.size());
-	Frame::Ptr current_frame, last_frame;
 	for (int index = 0; index < dataset.size(); ++index)
 	{
-		measure_time.start();
+		Timer timer("Frame " + std::to_string(index));
 
 		// Read Image
-		cv::Mat img;
-		dataset.getData(index, img, false);
+		cv::Mat_<uchar> img;
+		dataset.getData(index, img);//, false);
 
-		current_frame = Frame::CreateFrame(img);
+		Sophus::SE3d gt_pose = dataset.getPose(index);
+		system->setGTPose(gt_pose);
+
+		auto current_frame = Frame::CreateFrame(img);
 		system->addFrame(current_frame);
 		
-		double process_time = measure_time.printTime("Frame - " + std::to_string(index));
+		double process_time = timer.printTime("Frame - " + std::to_string(index));
 		sum += process_time;
 		printf("[FPS] : %f\n", ((index + 1.)/ sum) * 1000.f);
 
@@ -56,13 +56,10 @@ int main(int argc, char **argv)
 		cv::applyColorMap(current_frame->kappa_, debug_kappa, cv::COLORMAP_JET);  // BRUE -> RED
 		cv::imshow("Debug - Curvature", debug_kappa);
 
-		//system->debugFeatureMatching();
+		system->debugFeatureMatching();
 		system->debugDenseTracking();
 		int key = cv::waitKey(1);
-		if (key == 's')
-		{
-			key = cv::waitKey(0);
-		}
+		if (key == 's') key = cv::waitKey(0);
 		if (key == 'q') break;
 	}
 	return 0;

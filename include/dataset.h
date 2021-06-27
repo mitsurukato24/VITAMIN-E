@@ -116,10 +116,10 @@ public:
 		img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
 	}
 
-	void getPose(int index, Sophus::SE3d& xi, bool flag_right=false)
+	Sophus::SE3d getPose(int index, bool flag_right=false)
 	{
 		assert(0 <= index && index < size_);
-		xi = Sophus::SE3d::exp(gt_poses_[index][flag_right]);
+		return Sophus::SE3d::exp(gt_poses_[index][flag_right]);
 	}
 
 private:
@@ -204,10 +204,16 @@ public:
 		depth.convertTo(depth, CV_32F, 1.f / 5000.f);
 	}
 
-	void getPose(int index, Sophus::SE3d& xi)
+	void getData(int index, cv::Mat& img, bool flag_rgb = false)
 	{
 		assert(0 <= index && index < size_);
-		xi = Sophus::SE3d::exp(gt_poses_[index][0]);
+		img = cv::imread(imgs_filenames_[index][0], flag_rgb);
+	}
+
+	Sophus::SE3d getPose(int index)
+	{
+		assert(0 <= index && index < size_);
+		return Sophus::SE3d::exp(gt_poses_[index][0]);
 	}
 
 private:
@@ -293,10 +299,16 @@ public:
 		depth.convertTo(depth, CV_32F, 1.f / 5000.f);
 	}
 
-	void getPose(int index, Sophus::SE3d& xi)
+	void getData(int index, cv::Mat& img, bool flag_color=false)
 	{
 		assert(0 <= index && index < size_);
-		xi = Sophus::SE3d::exp(gt_poses_[index][0]);
+		img = cv::imread(imgs_filenames_[index][0], flag_color);
+	}
+
+	Sophus::SE3d getPose(int index)
+	{
+		assert(0 <= index && index < size_);
+		return Sophus::SE3d::exp(gt_poses_[index][0]);
 	}
 
 private:
@@ -370,6 +382,12 @@ public:
 	void getData(int index, cv::Mat &gray, bool flag_right=false)
 	{
 		gray = cv::imread(imgs_filenames_[index][flag_right], cv::IMREAD_GRAYSCALE);
+	}
+
+	Sophus::SE3d getPose(int index, bool flag_right=false)
+	{
+		assert(0 <= index && index < size_);
+		return Sophus::SE3d::exp(gt_poses_[index][flag_right]);
 	}
 
 private:
