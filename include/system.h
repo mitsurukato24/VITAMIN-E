@@ -32,10 +32,10 @@ public:
         Timer timer("Add frame");
         last_frame_ = std::move(current_frame_);
         current_frame_ = std::move(frame);
-        timer.printTime("--- swap frame");
+        timer.print("swap frame");
 
         current_frame_->featureExtract(brief_ptr);
-        timer.printTime("--- feature extract");
+        timer.print("feature extract");
         switch (status_)
         {
         case SystemStatus::INITING:
@@ -49,7 +49,7 @@ public:
         default:
             break;
         }
-        timer.printTime();
+        timer.print();
         return true; 
     }
 
@@ -104,7 +104,7 @@ private:
     void estimateAffine(Eigen::Matrix<double, 2, 3> &affine)
     {
         // TODO: Undistortion
-        Timer time_affine("--- Estimate Affine");
+        Timer time_affine("Estimate Affine");
 
         matcher->match(last_frame_->ds_desc_, current_frame_->ds_desc_, current_frame_->ds_matches_);
         std::sort(current_frame_->ds_matches_.begin(), current_frame_->ds_matches_.end(),
@@ -125,41 +125,42 @@ private:
         affine << affine_mat(0, 0), affine_mat(0, 1), affine_mat(0, 2) * current_frame_->resize_scale_,
             affine_mat(1, 0), affine_mat(1, 1), affine_mat(1, 2) * current_frame_->resize_scale_;
 
-        time_affine.printTime();
+        time_affine.print();
     }
 
     void denseTracking(const Eigen::Matrix<double, 2, 3> &affine)
     {
         // TODO: Undistortion
-        Timer timer("--- Dense Tracking");
+        Timer timer("Dense Tracking");
 
         cv::Mat_<uchar> l_kappa = last_frame_->kappa_;
         cv::Mat_<uchar> c_kappa = current_frame_->kappa_;
         std::vector<Eigen::Vector2d> l_features, c_features;
         l_features.assign(l_kappa.cols * l_kappa.rows, Eigen::Vector2d(-1, -1));  // for thread safe, store at [col][row]
         c_features.assign(c_kappa.cols * c_kappa.rows, Eigen::Vector2d(-1, -1));
+
+        timer.print("prepare data");
         last_frame_->kappa_.forEach(
             [&l_kappa, &c_kappa, &affine, &l_features, &c_features](uchar &pixel, const int* position) -> void
             {
                 const double roi = 10.f;
-                const double lambda = 5.f;
-                const double sigma2 = 5.f;
-                const double step_size = 0.2f;
+                const double lambda = 2.f;
+                const double sigma2 = 10.f;
+                const double step_size = 0.5f;
                 const int height = l_kappa.rows;
                 const int width = l_kappa.cols;
                 const int x = position[1], y = position[0];
+                const int max_num_iteration = 100;
                 const uchar threshold = 50;
                 
                 Eigen::Vector2d last_pt(x, y);
                 // get initial guess
-                Eigen::Vector2d init_pt = affine * Eigen::Vector3d(x, y, 1.f);
-                bool flag_invalid = init_pt[0] < roi || init_pt[0] > width - roi || init_pt[1] < roi || init_pt[1] > height - roi;
+                Eigen::Vector2d max_pt = affine * Eigen::Vector3d(x, y, 1.);
+                bool flag_invalid = max_pt[0] < roi || max_pt[0] > width - roi || max_pt[1] < roi || max_pt[1] > height - roi;
                 if (l_kappa.ptr(y)[x] < threshold || flag_invalid) return;
-                double init_f = getSubpixelValue(c_kappa.data, init_pt[0], init_pt[1], width, height)/255.f + lambda;
+                double max_f = getSubpixelValue(c_kappa.data, max_pt[0], max_pt[1], width, height) / 255. + lambda;
 
-                double max_f = init_f;
-                Eigen::Vector2d max_pt = init_pt;
-                for (int i = 0; i < 50; ++i)
+                for (int i = 0; i < max_num_iteration; ++i)
                 {
                     bool flag_found = false;
                     for (int dy = -1; dy <= 1; ++dy)
@@ -182,32 +183,37 @@ private:
                     }
                     if (!flag_found) break;
                 }
+
                 l_features[y * width + x] = last_pt;
                 c_features[y * width + x] = max_pt;
             }
         );
-        timer.printTime("tracking");
+        timer.print("tracking");
 
         l_features.erase(std::remove(l_features.begin(), l_features.end(), Eigen::Vector2d(-1, -1)));
         c_features.erase(std::remove(c_features.begin(), c_features.end(), Eigen::Vector2d(-1, -1)));
-        timer.printTime("removing");
+        timer.print("removing");
 
         uint l_size = last_frame_->features_.size();
 
-
+        const double photometric_error_threshold = 10.;
         current_frame_->features_.reserve(c_kappa.cols * c_kappa.rows);
         current_frame_->match_data_.matches_.reserve(c_kappa.cols * c_kappa.rows);
-        for (size_t i = 0, c = 0; i < c_features.size(); ++i)
+        for (size_t i = 0, count = 0; i < c_features.size(); ++i)
         {
             if (c_features[i][0] < 0) continue;
+            double l = getSubpixelValue(last_frame_->img_.data, l_features[i][0], l_features[i][1], last_frame_->img_.cols, last_frame_->img_.rows);
+            double c = getSubpixelValue(current_frame_->img_.data, c_features[i][0], c_features[i][1], current_frame_->img_.cols, current_frame_->img_.rows);
+            if (std::abs(l-c) > photometric_error_threshold) continue;
             last_frame_->features_.emplace_back(std::make_shared<Feature>(l_features[i]));
             current_frame_->features_.emplace_back(std::make_shared<Feature>(c_features[i]));
-            current_frame_->match_data_.matches_.emplace_back(std::pair<uint, uint>(l_size + c, c));
-            ++c;
+            current_frame_->match_data_.matches_.emplace_back(std::pair<uint, uint>(l_size + count, count));
+            ++count;
         }
-        timer.printTime("push");
+        printf("%d dense features\n", (int)current_frame_->features_.size());
+        timer.print("push");
 
-        timer.printTime();
+        timer.print();
     }
 
     inline static bool estimateRotation(
@@ -216,7 +222,7 @@ private:
         Sophus::SO3d &R_1_0
     )
     {
-        Timer timer("--- Estimate Rotation");
+        Timer timer("Estimate Rotation");
 
         using namespace opengv;
         if ((int)frame1->match_data_.matches_.size() < num_ransac_min_inliers) return false;
@@ -231,7 +237,7 @@ private:
             bvs0.emplace_back(bearingVector_t(cam->unproject(frame0->features_[m.first]->position_)));
             bvs1.emplace_back(bearingVector_t(cam->unproject(frame1->features_[m.second]->position_)));
         }
-        timer.printTime("--- make bearing vectors");
+        timer.print("make bearing vectors");
         
         relative_pose::CentralRelativeAdapter adapter(bvs0, bvs1);
         sac::Ransac<sac_problems::relative_pose::EigensolverSacProblem> ransac;
@@ -267,8 +273,6 @@ private:
             return false;
         }
 
-        
-
         frame1->match_data_.inliers_.clear();
         frame1->match_data_.inliers_.reserve(ransac.inliers_.size());
         for (size_t i = 0; i < ransac.inliers_.size(); ++i)
@@ -277,7 +281,7 @@ private:
         }
         R_1_0 = Sophus::SO3d(optimized_model.rotation);
         
-        timer.printTime();
+        timer.print();
         return true;
     }
 
@@ -288,7 +292,7 @@ private:
         Sophus::SE3d &T_1_0
     )
     {
-        Timer timer("--- Estimate Translation");
+        Timer timer("Estimate Translation");
 
         using namespace opengv;
         bearingVectors_t bvs0(frame1->match_data_.inliers_.size()), bvs1(frame1->match_data_.inliers_.size());
@@ -298,7 +302,7 @@ private:
             bvs0[i] = bearingVector_t(cam->unproject(frame0->features_[frame1->match_data_.matches_[inlier].first]->position_).normalized());
             bvs1[i] = bearingVector_t(cam->unproject(frame1->features_[frame1->match_data_.matches_[inlier].second]->position_).normalized());
         }
-        timer.printTime("--- push bearing vector");
+        timer.print("push bearing vector");
 
         bool flag_5pt = true;
         if (flag_5pt)
@@ -362,7 +366,7 @@ private:
 
             T_1_0 = Sophus::SE3d(nonlinear_transformation.leftCols<3>(), nonlinear_transformation.rightCols<1>());
         }
-        timer.printTime();
+        timer.print();
         return true;
     }
 
@@ -400,12 +404,12 @@ private:
             bvs0.emplace_back(bearingVector_t(cam_->unproject(frame0->features_[m.first]->position_)));
             bvs1.emplace_back(bearingVector_t(cam_->unproject(frame1->features_[m.second]->position_)));
         }
-        timer.printTime("--- make bearing vectors");
+        timer.print("make bearing vectors");
 
         // Set adapter
         relative_pose::CentralRelativeAdapter adapter(
             bvs0, bvs1, T_1_0.translation(), T_1_0.rotationMatrix());
-
+        
         int count = 0;
         const size_t iterations = 100;
         for (size_t j = 0; j < frame1->match_data_.inliers_.size(); ++j)
@@ -415,13 +419,12 @@ private:
             {
                 triangulation::triangulate2(adapter, j);
             }
-            if (triangulation::triangulate2(adapter, j).z() < 0)
-            {
-                continue;
-            }
+
+            point_t p3d = triangulation::triangulate2(adapter, j);
+            if (p3d.z() < 0.3 || p3d.z() > 10.) continue;
 
             auto new_landmark = Landmark::createNewLandmark();
-            new_landmark->position_ = frame0->T_i_w_.rotationMatrix() * triangulation::triangulate2(adapter, j) + frame0->T_i_w_.translation();
+            new_landmark->setPosition(frame0->T_i_w_.rotationMatrix() * p3d + frame0->T_i_w_.translation());
             const auto m = frame1->match_data_.matches_[frame1->match_data_.inliers_[j]];
             new_landmark->addObservation(frame0->features_[m.first]);
             new_landmark->addObservation(frame1->features_[m.second]);
@@ -431,12 +434,14 @@ private:
             ++count;
         }
 
-        timer.printTime();
+        timer.print();
         return count;
     }
 
     bool initializePose()
     {
+        Timer timer("Initialize pose");
+
         const double ransac_reproj_error_inlier_threshld_pixel = 2.;
         const int num_ransac_min_inlier = 20;
 
@@ -444,7 +449,7 @@ private:
         Sophus::SO3d relative_R;
         bool success_r = estimateRotation(last_frame_, current_frame_, cam_, ransac_reproj_error_inlier_threshld_pixel, num_ransac_min_inlier, relative_R);
         if (!success_r) return false;
-
+        /*
         // Calculation mean disparity
         double mean_disp = calcMeanDisparity(last_frame_, current_frame_, relative_R);
         printf("------------------ Mean Disparity : %f\n", mean_disp);
@@ -452,9 +457,6 @@ private:
         if (mean_disp < disp_threshold) return false;
         // return false;
 
-        // Estimate relative translation
-        Sophus::SE3d T_c_l;
-        /*
         bool success_t = estimateTranslation(
             last_frame_, current_frame_, relative_R, cam_,
             ransac_reproj_error_inlier_threshld_pixel, num_ransac_min_inlier, T_c_l
@@ -462,10 +464,12 @@ private:
         current_frame_->setPose(T_c_l * last_frame_->getPose());
         if (!success_t) return false;
         */
-        T_c_l = last_frame_->T_i_w_.inverse() * current_frame_->T_i_w_;
+        Sophus::SE3d T_c_l = last_frame_->T_i_w_.inverse() * current_frame_->T_i_w_;
+        std::cout << "T_c_l\n" << T_c_l.matrix() << std::endl;
 
         triangulate(last_frame_, current_frame_, T_c_l);
 
+        timer.print();
         return true;
     }
 
@@ -476,9 +480,7 @@ private:
         denseTracking(affine);
 
         current_frame_->setPose(gt_poses_[gt_poses_.size()-1]);
-        
         bool success = initializePose();
-        
 
         // trianguration for p3p and initial guess for BA
 
@@ -494,8 +496,8 @@ private:
     bool insertKeyframe()
     {
         // use all frame as keyframe ... 
-        current_frame_->setKeyFrame();
-        map_->insertKeyFrame(current_frame_);
+        current_frame_->setKeyframe();
+        map_->insertKeyframe(current_frame_);
 
         setObservationsForKeyframe();
         // triangulate
@@ -506,18 +508,22 @@ private:
 
     void setObservationsForKeyframe()
     {
+        Timer timer("Set observation for keyframe");
         for (auto &inlier : current_frame_->match_data_.inliers_)
         {
             auto m = current_frame_->match_data_.matches_[inlier];
             auto landmark = current_frame_->features_[m.second]->landmark_.lock();
             if (landmark) landmark->addObservation(current_frame_->features_[m.second]);
         }
+        timer.print();
     }
 
     bool buildInitMap()
     {
-        current_frame_->setKeyFrame();
-        map_->insertKeyFrame(current_frame_);
+        Timer timer("Build init map\n");
+        current_frame_->setKeyframe();
+        map_->insertKeyframe(current_frame_);
+        timer.print();
         return true;
     }
 

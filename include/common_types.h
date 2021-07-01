@@ -15,11 +15,24 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/xfeatures2d.hpp>
 
+typedef Eigen::Vector2f Vector2f;
+typedef Eigen::Vector3f Vector3f;
+typedef Eigen::Matrix<float, 6, 1> Vector6f;
+typedef Eigen::Matrix<float, 7, 1> Vector7f;
+typedef Eigen::Matrix3f Matrix3f;
+typedef Eigen::Matrix4f Matrix4f;
 
-typedef Eigen::Matrix<double, 6, 1> Vector6f;
-typedef Eigen::Matrix<double, 7, 1> Vector7f;
+typedef Eigen::Vector2d Vector2d;
+typedef Eigen::Vector3d Vector3d;
 typedef Eigen::Matrix<double, 6, 1> Vector6d;
 typedef Eigen::Matrix<double, 7, 1> Vector7d;
+typedef Eigen::Matrix3d Matrix3d;
+typedef Eigen::Matrix4d Matrix4d;
+
+typedef Sophus::SE3f SE3f;
+typedef Sophus::SO3f SO3f;
+typedef Sophus::SE3d SE3d;
+typedef Sophus::SO3d SO3d;
 
 
 static inline double getSubpixelValue(const uchar* img_ptr, const double x, const double y, const int width, const int height)
@@ -121,14 +134,29 @@ struct Camera
 
 struct Timer
 {
-    inline Timer(std::string name) : name(name)
+    inline Timer(std::string name) : name_(name)
     {
         start();
     }
 
+    inline double print(std::string s="")
+    {
+        double duration = end();
+        if (s == "")
+        {
+            printf("[Time] : [ END ] %s %f[ms]\n", name_.c_str(), duration);
+        }
+        else
+        {
+            printf("[Time] : [ --- ] --- %s %f[ms]\n", s.c_str(), duration);
+        }        
+        return duration;
+    }
+
+private:
     inline void start()
     {
-        printf("[TIME] : [START] %s\n", name.c_str());
+        printf("[TIME] : [START] %s\n", name_.c_str());
         start_ = std::chrono::system_clock::now();
     }
 
@@ -139,16 +167,8 @@ struct Timer
         return static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(end_ - start_).count() / 1000.0);
     }
 
-    inline double printTime(std::string s="")
-    {
-        double duration = end();
-        printf("[Time] : [ END ] %s %s %f[ms]\n", name.c_str(), s.c_str(), duration);
-        return duration;
-    }
-
-private:
     std::chrono::system_clock::time_point start_, end_;
-    std::string name;
+    std::string name_;
 };
 
 
@@ -227,14 +247,14 @@ public:
         );
 	}
 
-    static std::shared_ptr<Frame> CreateFrame(cv::Mat &img)
+    static std::shared_ptr<Frame> createFrame(cv::Mat &img)
     {
         static int factory_id = 0;
         Frame::Ptr new_frame = std::make_shared<Frame>(factory_id++, img);
         return new_frame;
     }
 
-    void setKeyFrame()
+    void setKeyframe()
     {
         static int keyframe_factory_id = 0;
         is_keyframe_ = true;
@@ -271,16 +291,18 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
     typedef std::shared_ptr<Landmark> Ptr;
     unsigned int id_ = 0;
+    bool is_outlier_ = false;
     Eigen::Vector3d position_ = Eigen::Vector3d::Zero();
     std::mutex data_mutex_;
     int observed_times_ = 0;
     std::list<std::weak_ptr<Feature>> observations_;
 
     Landmark() {}
-    Landmark(int id, Eigen::Vector3d &position) : id_(id), position_(position) {}
+    Landmark(int id, Eigen::Vector3d position) : id_(id), position_(position) {}
 
     void addObservation(Feature::Ptr feature)
     {
+        std::unique_lock<std::mutex> lock(data_mutex_);
         observations_.push_back(feature);
         ++observed_times_;
     }
@@ -313,6 +335,18 @@ public:
         std::unique_lock<std::mutex> lock(data_mutex_);
         return observations_;
     }
+
+    Eigen::Vector3d getPosition()
+    {
+        std::unique_lock<std::mutex> lock(data_mutex_);
+        return position_;
+    }
+
+    void setPosition(const Eigen::Vector3d &position)
+    {
+        std::unique_lock<std::mutex> lock(data_mutex_);
+        position_ = position;
+    }
 };
 
 
@@ -326,23 +360,23 @@ public:
     
     Map() {}
 
-    void insertKeyFrame(Frame::Ptr frame)
+    void insertKeyframe(Frame::Ptr frame)
     {
         Timer timer("Insert keyframe");
         current_frame_ = frame;
         if (keyframes_.find(frame->keyframe_id_) == keyframes_.end())
         {
-            printf("a\n");
+            printf("insert\n");
             keyframes_.insert(std::make_pair(frame->keyframe_id_, frame));
             active_keyframes_.insert(std::make_pair(frame->keyframe_id_, frame));
         }
         else
         {
-            printf("b\n");
+            printf("move\n");
             keyframes_[frame->keyframe_id_] = std::move(frame);
             active_keyframes_[frame->keyframe_id_] = std::move(frame);
         }
-        timer.printTime();
+        timer.print();
     }
 
     void insertLandmark(Landmark::Ptr landmark)
@@ -361,21 +395,25 @@ public:
 
     LandmarksType getAllLandmarks()
     {
+        std::unique_lock<std::mutex> lock(data_mutex_);
         return landmarks_;
     }
 
     KeyframesType getAllKeyframes()
     {
+        std::unique_lock<std::mutex> lock(data_mutex_);
         return keyframes_;
     }
 
     LandmarksType getActiveLandmarks()
     {
+        std::unique_lock<std::mutex> lock(data_mutex_);
         return active_landmarks_;
     }
 
     KeyframesType getActiveKeyframes()
     {
+        std::unique_lock<std::mutex> lock(data_mutex_);
         return active_keyframes_;
     }
 
@@ -401,6 +439,7 @@ private:
     void removeOldKeyframe()
     {
 		if (current_frame_ == nullptr) return;
+
 		// find two closest and farthest keyframe from current frame
 		double max_dis = 0, min_dis = 9999;
 		double max_kf_id = 0, min_kf_id = 0;

@@ -4,31 +4,29 @@
 #include "common_types.h"
 
 
+// depth, baseline, pose are in meter.
 class Dataset
 {
 public:
 	int size() { return size_; }
 	Camera::Ptr getCamera() { return cam_; }
-	// virtual void getData(int index, cv::Mat &img, cv::Mat &depth) const {}
 
 protected:
 	Dataset() {}
 
 	Camera::Ptr cam_;
 	int width_, height_;
-	double fx_, fy_, cx_, cy_;
-	double distortion[5] = { 0 };
-	cv::Mat K_;
-	double baseline_;  // for stereo
+	float fx_, fy_, cx_, cy_;
+	float distortion[5] = { 0 };
+	float baseline_;  // for stereo
 
 	int size_;  // the number of images
 
 	std::vector<std::vector<std::string>> imgs_filenames_, depths_filenames_;
-	std::vector<std::vector<Vector6d>> gt_poses_;
-
+	std::vector<std::vector<Vector6f>> gt_poses_;
 	std::vector<std::string> time_stamps_;
 
-	inline std::string getZeropadStr(int num, int len)
+	inline std::string getZeropadStr(const int num, const int len)
 	{
 		// For example: getNumOfZeropadString(1234, 6) return "001234"
 		std::ostringstream oss;
@@ -49,88 +47,97 @@ public:
 	NewStereoTsukubaDataset(const std::string dataset_dir, const ILLUMINATION illumination = ILLUMINATION::FLUORESCENT)
 	{
 		// Set camera parameters
-		cam_ = std::make_shared<Camera>(640, 480, 615.f, 615.f, 320, 240);
-		baseline_ = 10.f;
+		cam_ = std::make_shared<Camera>(640, 480, 615.f, 615.f, 320.f, 240.f);
+		baseline_ = 10.f * rescale_;
 		size_ = 1800;
 
 		const std::string ill_str = getStrOfIllumination(illumination);
 		const std::string rgb_dir = dataset_dir + "illumination/" + ill_str + "/";
 		const std::string depth_dir = dataset_dir + "groundtruth/depth_maps/";
+
 		const std::string gt_camera_track_filename = dataset_dir + "groundtruth/camera_track.txt";
 		std::ifstream ifs(gt_camera_track_filename);
-		std::string line;
-		int count = 1;
-		while (std::getline(ifs, line))
+		if (ifs.fail())
 		{
-			// Get pose
-			Vector6d pose_center;
+			std::cerr << "Failed to load " + gt_camera_track_filename + "!!!!\n";
+			throw std::exception();
+		}
+		
+		std::string line;
+		for (int count = 1; std::getline(ifs, line); ++count)
+		{
+			time_stamps_.push_back(std::to_string(count));
 			std::stringstream ss(line);
 			// X Y Z A B C : x, y, z, theta_x, theta_y, theta_z
+			Vector6f pose_center;
+			std::string s;
 			for (int i = 0; i < 6; ++i)
 			{
-				std::string tmps;
-				ss >> tmps;
-				// rotate 180 deg
-				if (i % 3 != 0)
-				{
-					pose_center(i) = std::stof(tmps);
-				}
-				else
-				{
-					pose_center(i) = - std::stof(tmps);
-				}
+				ss >> s;
+				if (i >= 3) pose_center(i) = std::stof(s)/ 180.f * M_PI;
+				else pose_center(i) = std::stof(s) * rescale_;
 			}
-			Sophus::SO3d xi = Sophus::SO3d::exp(pose_center.tail(3));
-			Eigen::Vector3d offset(baseline_ / 2.f, 0.f, 0.f);
-			offset = xi.matrix() * offset;
-			gt_poses_.push_back(std::vector<Vector6d>{
-				Sophus::SE3d(xi, pose_center.head(3) - offset).log(),
-					Sophus::SE3d(xi, pose_center.head(3) + offset).log()
-			});
+			Matrix3f R = Eigen::AngleAxisf(M_PI, Vector3f(0, 1, 0)).toRotationMatrix();
+			// Matrix3f R = (Eigen::AngleAxisf(-pose_center(2), Vector3f::UnitZ()) * Eigen::AngleAxisf(pose_center(1), Vector3f::UnitY()) * Eigen::AngleAxisf(pose_center(0), Vector3f::UnitX())).matrix();
+			pose_center(2) = - pose_center(2);
 
+			SE3f xi = SE3f(SO3f::exp(pose_center.tail(3)), pose_center.head(3));
+			SE3f left = SE3f(R, Vector3f(0, 0, 0));
+			// SE3f right = SE3f(R, Vector3f(baseline_ / 2.f, 0, 0));
+			gt_poses_.push_back(std::vector<Vector6f>{
+				(left * xi).log()
+				// SE3f(xi, xi.matrix() * pose_center.head(3) * rescale_).log()
+				// SE3f(xi, pose_center.head(3) * rescale_ - offset).log(),
+				// SE3f(xi, pose_center.head(3) * rescale_ + offset).log()
+			});
+			
 			// Get filenames
 			std::string count_zeropad = getZeropadStr(count, 5);
 			imgs_filenames_.push_back(std::vector<std::string>{
 				rgb_dir + "left/tsukuba_" + ill_str + "_L_" + count_zeropad + ".png",
-					rgb_dir + "right/tsukuba_" + ill_str + "_R_" + count_zeropad + ".png"
+				rgb_dir + "right/tsukuba_" + ill_str + "_R_" + count_zeropad + ".png"
 			});
 			depths_filenames_.push_back(std::vector<std::string>{
 				depth_dir + "left/tsukuba_depth_L_" + count_zeropad + ".xml",
-					depth_dir + "right/tsukuba_depth_R_" + count_zeropad + ".xml"
+				depth_dir + "right/tsukuba_depth_R_" + count_zeropad + ".xml"
 			});
-			++count;
 		}
 		ifs.close();
+
+		size_ = gt_poses_.size();
 	}
 
-	void getData(int index, cv::Mat& img, cv::Mat& depth, bool flag_right=false, bool flag_color=false)
+	inline cv::Mat getImage(int index, bool flag_right=false, bool flag_color=false)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
-		getDepth(depths_filenames_[index][flag_right], depth);
+		cv::Mat img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
+		return img;
 	}
 
-	void getData(int index, cv::Mat& img, bool flag_right=false, bool flag_color=false)
+	inline cv::Mat getDepth(int index, bool flag_right=false)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
+		cv::FileStorage fs(depths_filenames_[index][flag_right], cv::FileStorage::READ);
+		if (!fs.isOpened())
+		{
+			std::cerr << depths_filenames_[index][flag_right] << " is opened...\n";
+			throw std::exception();
+		}
+		cv::Mat depth;
+		fs["depth"] >> depth;
+		fs.release();
+		depth.convertTo(depth, CV_32F, rescale_);
+		return depth;
 	}
 
-	Sophus::SE3d getPose(int index, bool flag_right=false)
+	inline SE3f getPose(int index, bool flag_right=false)
 	{
 		assert(0 <= index && index < size_);
-		return Sophus::SE3d::exp(gt_poses_[index][flag_right]);
+		return SE3f::exp(gt_poses_[index][flag_right]);
 	}
 
 private:
-	void getDepth(std::string filename, cv::Mat& depth)
-	{
-		cv::FileStorage fs(filename, cv::FileStorage::READ);
-		if (!fs.isOpened()) throw std::exception();
-		fs["depth"] >> depth;
-		fs.release();
-		depth.convertTo(depth, CV_32F, 0.1f);
-	}
+	const float rescale_ = 0.01f;
 
 	inline std::string getStrOfIllumination(ILLUMINATION illumination)
 	{
@@ -145,13 +152,13 @@ private:
 		case ILLUMINATION::LAMPS:
 			return "lamps";
 		default:
+			std::cerr << "illumination type is wrong!!!\n";
 			throw;
 		}
 	}
 };
 
 
-// TODO: change associations.txt style 
 /// <summary>
 /// https://vision.in.tum.de/data/datasets/rgbd-dataset
 /// </summary>
@@ -160,21 +167,30 @@ class TUMRGBDDataset : public Dataset
 public:
 	enum class TUMRGBD { FREIBURG1, FREIBURG2, FREIBURG3 };
 
-	TUMRGBDDataset(const std::string dataset_dir, TUMRGBD tumrgbd)
+	TUMRGBDDataset(const std::string dataset_dir, const TUMRGBD tumrgbd)
 	{
 		setCameraParameters(tumrgbd);
 
 		std::ifstream ifs(dataset_dir + "associations.txt");
-		int count = 0;
+		if (ifs.fail())
+		{
+			std::cerr << "Failed to load " + dataset_dir + "associations.txt!!!!!!!!\n";
+			throw std::exception();
+		}
+		
 		std::string line;
 		while (std::getline(ifs, line))
 		{
 			std::stringstream ss(line);
-			Vector7d tmp;
+			Vector7f tmp;
+			std::string s;
 			for (int i = 0; i < 12; ++i)
 			{
-				std::string s;
 				ss >> s;
+				if (i == 0)
+				{
+					time_stamps_.push_back(s);
+				}
 				if (i == 1)
 				{
 					imgs_filenames_.push_back(std::vector<std::string>{ dataset_dir + s });
@@ -188,32 +204,31 @@ public:
 					tmp(i - 5) = std::stof(s);
 				}
 			}
-			Eigen::Quaterniond q(tmp(6), tmp(3), tmp(4), tmp(5));
-			gt_poses_.push_back(std::vector<Vector6d>{Sophus::SE3d(q, tmp.head(3)).log()});
-			++count;
+			Eigen::Quaternionf q(tmp(6), tmp(3), tmp(4), tmp(5));
+			gt_poses_.push_back(std::vector<Vector6f>{ SE3f(q, tmp.head(3)).log() });
 		}
 		ifs.close();
-		size_ = count;
+		size_ = gt_poses_.size();
 	}
 
-	void getData(int index, cv::Mat& img, cv::Mat& depth, bool flag_rgb = false)
+	inline cv::Mat getImage(int index, bool flag_rgb=false)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][0], flag_rgb);
-		depth = cv::imread(depths_filenames_[index][0], cv::IMREAD_UNCHANGED);
+		cv::Mat img = cv::imread(imgs_filenames_[index][0], flag_rgb);
+		return img;
+	}
+
+	inline cv::Mat getDepth(int index)
+	{
+		cv::Mat depth = cv::imread(depths_filenames_[index][0], cv::IMREAD_UNCHANGED);
 		depth.convertTo(depth, CV_32F, 1.f / 5000.f);
+		return depth;
 	}
 
-	void getData(int index, cv::Mat& img, bool flag_rgb = false)
+	inline SE3f getPose(int index)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][0], flag_rgb);
-	}
-
-	Sophus::SE3d getPose(int index)
-	{
-		assert(0 <= index && index < size_);
-		return Sophus::SE3d::exp(gt_poses_[index][0]);
+		return SE3f::exp(gt_poses_[index][0]);
 	}
 
 private:
@@ -247,30 +262,31 @@ class ICLNUIMDataset : public Dataset
 public:
 	enum class ICLNUIM
 	{
-		LR_KT0,  // living room
-		LR_KT1,
-		LR_KT2,
-		LR_KT3,
-		OF_KT0,  // office room
-		OF_KT1,
-		OF_KT2,
-		OF_KT3,
+		// living room
+		LR_KT0, LR_KT1, LR_KT2, LR_KT3,
+		// office room
+		OF_KT0, OF_KT1, OF_KT2, OF_KT3
 	};
 
-	ICLNUIMDataset(std::string dataset_dir, ICLNUIM iclnuim)
+	ICLNUIMDataset(const std::string dataset_dir, const ICLNUIM iclnuim)
 	{
-		cam_ = std::make_shared<Camera>(640, 480, 481.2f, -480.f, 319.5f, 239.5f);
+		cam_ = std::make_shared<Camera>(640, 480, 481.2f, -480.0f, 319.5f, 239.5f);
 
 		std::ifstream ifs(dataset_dir + getPoseFilename(iclnuim));
+		if (ifs.fail())
+		{
+			std::cerr << "Failed to load " + dataset_dir + getPoseFilename(iclnuim) + "!!!!!\n";
+			throw std::exception();
+		}
+		
 		std::string line;
-		int count = 0;
 		while (std::getline(ifs, line))
 		{
 			std::stringstream ss(line);
-			Vector7d tmp;
+			Vector7f tmp;
+			std::string s;
 			for (int i = 0; i < 8; ++i)
 			{
-				std::string s;
 				ss >> s;
 				if (i == 0)
 				{
@@ -283,32 +299,31 @@ public:
 					tmp(i - 1) = std::stof(s);
 				}
 			}
-			Eigen::Quaterniond q(tmp(6), tmp(3), tmp(4), tmp(5));
-			gt_poses_.push_back(std::vector<Vector6d>{Sophus::SE3d(q, tmp.head(3)).log()});
-			++count;
+			Eigen::Quaternionf q(tmp(6), tmp(3), tmp(4), tmp(5));
+			gt_poses_.push_back(std::vector<Vector6f>{ SE3f(q, tmp.head(3)).log() });
 		}
 		ifs.close();
-		size_ = count;
+		size_ = gt_poses_.size();
 	}
-	
-	void getData(int index, cv::Mat& img, cv::Mat& depth, bool flag_color=false)
+		
+	inline cv::Mat getImage(int index, bool flag_rgb=false)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][0], flag_color);
-		depth = cv::imread(depths_filenames_[index][0], cv::IMREAD_UNCHANGED);
+		cv::Mat img = cv::imread(imgs_filenames_[index][0], flag_rgb);
+		return img;
+	}
+
+	inline cv::Mat getDepth(int index)
+	{
+		cv::Mat depth = cv::imread(depths_filenames_[index][0], cv::IMREAD_UNCHANGED);
 		depth.convertTo(depth, CV_32F, 1.f / 5000.f);
+		return depth;
 	}
 
-	void getData(int index, cv::Mat& img, bool flag_color=false)
+	inline SE3f getPose(int index)
 	{
 		assert(0 <= index && index < size_);
-		img = cv::imread(imgs_filenames_[index][0], flag_color);
-	}
-
-	Sophus::SE3d getPose(int index)
-	{
-		assert(0 <= index && index < size_);
-		return Sophus::SE3d::exp(gt_poses_[index][0]);
+		return SE3f::exp(gt_poses_[index][0]);
 	}
 
 private:
@@ -339,7 +354,6 @@ private:
 };
 
 
-// TODO: read data_odometry_pose and get gt pose
 /// <summary>
 /// http://www.cvlibs.net/datasets/kitti/eval_odometry.php
 /// </summary>
@@ -351,47 +365,76 @@ public:
 	/// </summary>
 	/// <param name="dataset_dir">directory path of data_odometry_gray</param>
 	/// <param name="sequence_index"> 0 ~ 12</param>
-	KITTIDataset(std::string odometry_dataset_dir, int sequence_index = 0)
+	KITTIDataset(const std::string dataset_dir, const int sequence_index=0)
 	{
 		assert(sequence_index >= 0 && sequence_index <= 12);
 		setCameraParameters(sequence_index);
-		std::string sequence_str = getZeropadStr(sequence_index, 2);
-		std::ifstream ifs(odometry_dataset_dir + sequence_str + "/times.txt");
-		if (ifs.fail())
+
+		const std::string sequence_str = getZeropadStr(sequence_index, 2);
+		const std::string gray_dataset_dir = dataset_dir + "data_odometry_gray/" + sequence_str + "/";
+		std::ifstream ifs_times(gray_dataset_dir + "times.txt");
+		if (ifs_times.fail())
 		{
-			std::cerr << "Failed to load dataset!!! : " + odometry_dataset_dir + sequence_str + "/times.txt\n";
-			return;
+			std::cerr << "Failed to load " + gray_dataset_dir + "times.txt!!!!\n";
+			throw std::exception();
 		}
+		
 		std::string line;
-		int count = 0;
-		while (std::getline(ifs, line))
+		for (int count = 0; std::getline(ifs_times, line); ++count)
 		{
 			time_stamps_.push_back(line);
 
 			std::string count_zeropad = getZeropadStr(count, 6);
 			imgs_filenames_.push_back(std::vector<std::string>{
-				odometry_dataset_dir + sequence_str + "/image_0/" + count_zeropad + ".png", 
-					odometry_dataset_dir + sequence_str + "/image_1/" + count_zeropad + ".png"
+				gray_dataset_dir + "image_0/" + count_zeropad + ".png", 
+				gray_dataset_dir + "image_1/" + count_zeropad + ".png"
 			});
-			++count;
 		}
-		ifs.close();
-		size_ = count;
+		ifs_times.close();
+		size_ = time_stamps_.size();
+
+		std::string pose_filename = dataset_dir + "data_odometry_poses/dataset/poses/" + sequence_str + ".txt";
+		std::ifstream ifs_poses(pose_filename);
+		if (ifs_poses.fail())
+		{
+			std::cerr << "Failed to load " + pose_filename + "!!!!!\n";
+			throw std::exception();
+		}
+
+		while (std::getline(ifs_poses, line))
+		{
+			std::stringstream ss(line);
+			std::string s;
+			Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+			for (int y = 0; y < 3; ++y)
+			{
+				for (int x = 0; x < 4; ++x)
+				{
+					ss >> s;
+					std::cout << s << " ";
+					T(y, x) = std::stof(s);
+				}
+			}
+			gt_poses_.push_back(std::vector<Vector6f>{ SE3f(T).log(), Vector6f::Zero() });
+		}
 	}
 
-	void getData(int index, cv::Mat &gray, bool flag_right=false)
-	{
-		gray = cv::imread(imgs_filenames_[index][flag_right], cv::IMREAD_GRAYSCALE);
-	}
-
-	Sophus::SE3d getPose(int index, bool flag_right=false)
+	inline cv::Mat getImage(int index, bool flag_right=false, bool flag_color=false)
 	{
 		assert(0 <= index && index < size_);
-		return Sophus::SE3d::exp(gt_poses_[index][flag_right]);
+		cv::Mat img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
+		return img;
 	}
 
+	inline SE3f getPose(int index, bool flag_right=false)
+	{
+		assert(0 <= index && index < size_);
+		return SE3f::exp(gt_poses_[index][flag_right]);
+	}
+
+
 private:
-	void setCameraParameters(int sequence_index)
+	void setCameraParameters(const int sequence_index)
 	{
 		if (sequence_index >= 0 && sequence_index <= 2)
 		{
@@ -427,15 +470,21 @@ public:
 
 	EUROCDataset(std::string &euroc_dataset_dir, EUROC euroc)
 	{
+		// Set camera parameters
 		cam_ = std::make_shared<Camera>(458.654, 457.296, 367.215, 248.375);
 		cam_->setDistortions(-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05, 0);
 
 		std::string dataset_path = euroc_dataset_dir + getString(euroc) + "/mav0/";
-		std::string time_stamps_path = dataset_path + "cam0/data.csv";
-		std::ifstream ifs_time_stamps(time_stamps_path);
-		std::string line;
-		int count = 0;
-		while(std::getline(ifs_time_stamps, line))
+
+		std::string time_stamps_filename = dataset_path + "cam0/data.csv";
+		std::ifstream ifs_time_stamps(time_stamps_filename);
+		if (ifs_time_stamps.fail())
+		{
+			std::cerr << "Failed to load " + time_stamps_filename + "!!!!\n";
+			throw std::exception();
+		}
+
+		for (std::string line; std::getline(ifs_time_stamps, line);)
 		{
 			if (line.size() < 20 || line[0] == '#') continue;
 			time_stamps_.push_back(line.substr(0, 19));
@@ -445,14 +494,22 @@ public:
 				dataset_path + "cam0/data/" + img_filename,
 				dataset_path + "cam1/data/" + img_filename
 			});
-			++count;
+			gt_poses_.push_back(std::vector<Vector6f>{ Vector6f::Zero(), Vector6f::Zero() });
 		}
-		size_ = count;
+		size_ = gt_poses_.size();
 	}
 
-	void getData(int index, cv::Mat &img, bool flag_right=false, bool flag_color=false)
+	inline cv::Mat getImage(int index, bool flag_right=false, bool flag_color=false)
 	{
-		img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
+		assert(0 <= index && index < size_);
+		cv::Mat img = cv::imread(imgs_filenames_[index][flag_right], flag_color);
+		return img;
+	}
+
+	inline SE3f getPose(int index, bool flag_right=false)
+	{
+		assert(0 <= index && index < size_);
+		return SE3f::exp(gt_poses_[index][flag_right]);
 	}
 
 private:
